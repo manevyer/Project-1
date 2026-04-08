@@ -7,6 +7,6 @@ sentence-transformers==2.6.1
 tqdm>=4.65.0
 streamlit==1.32.0
 groq==0.4.2
-langchain-chroma==0.1.0
-langchain-huggingface==0.1.0
-pysqlite3-binary==0.5.2.post3
+langchain-chroma
+langchain-huggingface
+pysqlite3-binary
