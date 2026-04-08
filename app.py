@@ -101,7 +101,7 @@ if prompt := st.chat_input("Staj başvurumu ne zamana kadar yapmalıyım?"):
         try:
             # Llama-3-8b-8192 is highly efficient and capable for RAG use cases.
             stream = client.chat.completions.create(
-                model="llama3-8b-8192",
+                model="llama-3.1-8b-instant",
                 messages=api_messages,
                 temperature=0.0, # ZERO temperature prevents hallucinations and ensures deterministic RAG outputs
                 stream=True
