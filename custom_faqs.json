@@ -1,0 +1,28 @@
+[
+  {
+    "topic": "Custom FAQs",
+    "user_query_variations": [
+      "Staj defterini nasıl ciltlemeliyim?",
+      "Defteri telli dosyaya koysam olur mu?",
+      "Rapor teslim formatı nasıl olmalı?"
+    ],
+    "chatbot_response": "Staj defterlerinizin (raporlarınızın) düzgün ciltlenmiş olarak (spiral cilt veya karton kapaklı cilt) teslim edilmesi gerekmektedir. Sayfaların kaybolmaması ve profesyonel bir görünüm için kopabilecek nitelikteki telli dosyalar tercih edilmemektedir."
+  },
+  {
+    "topic": "Custom FAQs",
+    "user_query_variations": [
+      "Bölüm staj koordinatörü kim?",
+      "Kime mail atmalıyım?",
+      "Staj mail adresi nedir?"
+    ],
+    "chatbot_response": "ODTÜ Endüstri Mühendisliği Bölümü Yaz Stajı Komitesi ile iletişime geçmek için ie-staj@metu.edu.tr adresine e-posta gönderebilirsiniz. Staj ile ilgili yaşadığınız idari problemlerde veya acil durumlarda ilgili asistanlara e-posta atmanız da süreci hızlandırabilir."
+  },
+  {
+    "topic": "Custom FAQs",
+    "user_query_variations": [
+      "IE 400 stajını bankada yapabilir miyim?",
+      "Hizmet sektöründe staj olur mu?"
+    ],
+    "chatbot_response": "Evet, IE 400 yaz stajı bankalar gibi hizmet sektörü kuruluşlarında yapılabilir. Önemli olan staj yaptığınız departmanın endüstri mühendisliği ile ilgili (süreç geliştirme, yöneylem araştırması, iş analitiği, sistem tasarımı vb.) bir uygulama alanı sunmasıdır. Hizmet sektörü için hazırlanan Service Manual kılavuzunu incelemeniz önerilir."
+  }
+]
