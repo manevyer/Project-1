@@ -40,7 +40,7 @@ def load_vector_db():
 
 
         # Using only relative file paths to ensure seamless deployment on Streamlit Cloud.
-        db = Chroma(persist_directory="./vector_db", embedding_function=embeddings, collection_name="metu_chatbot)
+        db = Chroma(persist_directory="./vector_db", embedding_function=embeddings, collection_name="metu_chatbot")
         return db
 
 
