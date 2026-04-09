@@ -1,50 +1,191 @@
+import os
+import re
 import requests
 from bs4 import BeautifulSoup
 import json
 import logging
 from urllib.parse import urljoin, urlparse
 from collections import deque
+from dotenv import load_dotenv
+import io
+
+# Optional imports for document parsing
+try:
+    import pypdf
+except ImportError:
+    pypdf = None
+
+try:
+    import docx
+except ImportError:
+    docx = None
+
+try:
+    from spire.doc import *
+    from spire.doc.common import *
+except ImportError:
+    Document = None
+
+# Langchain splitter
+try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+except ImportError:
+    RecursiveCharacterTextSplitter = None
 
 # Set up logging for error handling and progress tracking
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-def fetch_html(url):
+def perform_login(session):
     """
-    Connects to the given URL using a proper User-Agent header to avoid being blocked.
-    Returns the parsed BeautifulSoup object or None if an error occurs.
+    Attempts to log in to the METU system using credentials from .env.
+    If no credentials are provided, simply returns False.
     """
+    load_dotenv()
+    username = os.getenv("METU_USERNAME")
+    password = os.getenv("METU_PASSWORD")
+    
+    if not username or not password or username == "your_username":
+        logging.info("No valid METU_USERNAME and METU_PASSWORD found in .env. Proceeding anonymously.")
+        return False
+        
+    login_url = "https://sp-ie.metu.edu.tr/en/user/login"
+    
+    logging.info(f"Attempting to log in as {username}...")
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
+    
+    try:
+        # First GET request to fetch form parameters like form_build_id (common in Drupal)
+        r = session.get(login_url, headers=headers)
+        soup = BeautifulSoup(r.content, 'html.parser')
+        
+        login_data = {
+            'name': username,
+            'pass': password,
+            'op': 'Log in'
+        }
+        
+        # Look for Drupal-specific form metadata
+        form_build_id_input = soup.find('input', {'name': 'form_build_id'})
+        form_id_input = soup.find('input', {'name': 'form_id'})
+        
+        if form_build_id_input:
+            login_data['form_build_id'] = form_build_id_input.get('value', '')
+        if form_id_input:
+            login_data['form_id'] = form_id_input.get('value', 'user_login')
+            
+        post_response = session.post(login_url, data=login_data, headers=headers)
+        post_response.raise_for_status()
+        
+        # Validating login context
+        if 'Log out' in post_response.text or 'Welcome' in post_response.text:
+            logging.info("Login successful!")
+            return True
+        else:
+            logging.warning("Login might have failed or the site acts differently. Scraping will proceed.")
+            return False
+            
+    except Exception as e:
+        logging.error(f"Login setup failed due to an error: {e}")
+        return False
+
+def fetch_html(url, session):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = session.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         return BeautifulSoup(response.content, 'html.parser')
     except requests.exceptions.RequestException as e:
-        logging.error(f"Failed to fetch {url}: {e}")
+        logging.error(f"Failed to fetch HTML {url}: {e}")
         return None
 
+def fetch_pdf_text(url, session):
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        response = session.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        if not pypdf:
+            logging.warning(f"pypdf not installed. Cannot read {url}")
+            return ""
+            
+        pdf_file = io.BytesIO(response.content)
+        reader = pypdf.PdfReader(pdf_file)
+        text = ""
+        for page in reader.pages:
+            t = page.extract_text()
+            if t:
+                text += t + "\n"
+        return text
+    except Exception as e:
+        logging.error(f"Failed to read PDF {url}: {e}")
+        return ""
+
+def fetch_docx_text(url, session):
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        response = session.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        if not docx:
+            logging.warning(f"python-docx not installed. Cannot read {url}")
+            return ""
+            
+        docx_file = io.BytesIO(response.content)
+        doc = docx.Document(docx_file)
+        text = "\n".join([para.text for para in doc.paragraphs])
+        return text
+    except Exception as e:
+        logging.error(f"Failed to read DOCX {url}: {e}")
+        return ""
+
+def fetch_doc_text(url, session):
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        response = session.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        if Document is None:
+            logging.warning(f"Spire.Doc not installed. Cannot read {url}")
+            return ""
+            
+        # Spire.Doc requires reading from a file object path on disk.
+        temp_path = "temp_download.doc"
+        with open(temp_path, "wb") as f:
+            f.write(response.content)
+            
+        doc = Document()
+        doc.LoadFromFile(temp_path)
+        text = doc.GetText()
+        doc.Close()
+        
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+            
+        text = text.replace("Evaluation Warning: The document was created with Spire.Doc for Python.", "")
+        return text.strip()
+    except Exception as e:
+        logging.error(f"Failed to read DOC {url}: {e}")
+        return ""
+
 def clean_data(soup):
-    """
-    Cleans the HTML by removing non-content elements like nav, footer, header, scripts, style, etc.
-    Returns the cleaned plain text.
-    """
     if not soup:
         return ""
     
-    # List of tags to completely remove to clean up the noise
-    tags_to_remove = ['nav', 'footer', 'header', 'script', 'style', 'aside', 'noscript', 'meta', 'link']
+    # Removed 'aside' to prevent data loss in important sidebars
+    tags_to_remove = ['nav', 'footer', 'header', 'script', 'style', 'noscript', 'meta', 'link']
     for tag in tags_to_remove:
         for element in soup.find_all(tag):
             element.decompose()
             
-    # Remove common noise classes (social media, share links, language switchers, dates)
     noise_classes = ['links', 'share-links', 'social', 'language-switcher', 'date-display-single', 'language', 'social-media']
     for cls in noise_classes:
         for element in soup.find_all(class_=cls):
             element.decompose()
             
-    # Attempt to find the main content area
     main_content = soup.find('main') or soup.find('article') or soup.find('div', class_='content') or soup.find('div', id='content') or soup.find('div', class_='region-content')
     
     if main_content:
@@ -52,48 +193,51 @@ def clean_data(soup):
     else:
         text = soup.body.get_text(separator='\n', strip=True) if soup.body else soup.get_text(separator='\n', strip=True)
         
-    return text
+    # Improve whitespace cleaning to prevent formatting issues 
+    text = re.sub(r'[\r\t\f\v ]+', ' ', text) # Replace horizontal spaces with a single space
+    text = re.sub(r'\n\s*\n+', '\n\n', text)  # Replace multiple newlines with double newline to preserve paragraph separation
+    
+    return text.strip()
 
 def chunk_text(text):
-    """
-    Splits the cleaned text into meaningful chunks without discarding small pieces of information.
-    We split by double newlines and merge smaller chunks so we don't lose data.
-    """
-    raw_chunks = text.split('\n\n')
-    chunks = []
-    current_chunk = ""
-    
-    for raw in raw_chunks:
-        raw = raw.strip()
-        if not raw:
-            continue
-        # If the chunk is very small (like a heading or list item), append it to the current chunk
-        # Also group up to ~500 characters to make meaningful chatbot responses
-        if len(current_chunk) + len(raw) < 500:
-            if current_chunk:
-                current_chunk += "\n\n" + raw
-            else:
-                current_chunk = raw
-        else:
-            if current_chunk:
-                chunks.append(current_chunk)
-            current_chunk = raw
-            
-    if current_chunk:
-        chunks.append(current_chunk)
+    if RecursiveCharacterTextSplitter:
+        # Use LangChain Text Splitter to prevent breaking words and missing data optimally
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=700, 
+            chunk_overlap=100,
+            separators=["\n\n", "\n", " ", ""]
+        )
+        return splitter.split_text(text)
+    else:
+        # Fallback 
+        raw_chunks = text.split('\n\n')
+        chunks = []
+        current_chunk = ""
         
-    return chunks
+        for raw in raw_chunks:
+            raw = raw.strip()
+            if not raw:
+                continue
+            if len(current_chunk) + len(raw) < 500:
+                if current_chunk:
+                    current_chunk += "\n\n" + raw
+                else:
+                    current_chunk = raw
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                current_chunk = raw
+                
+        if current_chunk:
+            chunks.append(current_chunk)
+        return chunks
 
 def format_to_json(chunks, source_url, page_title):
-    """
-    A dummy function mapping extracted chunks to the target JSON schema.
-    """
     dataset = []
     
     for i, chunk in enumerate(chunks):
         topic = f"{page_title} - Section {i+1}" if page_title else f"Information from {source_url} - Section {i+1}"
         
-        # Simple heuristic to categorize topic based on keyword presence
         lower_chunk = chunk.lower()
         if 'ie 300' in lower_chunk or 'ie300' in lower_chunk:
             topic = "IE 300 Internship Requirements"
@@ -119,11 +263,7 @@ def format_to_json(chunks, source_url, page_title):
         
     return dataset
 
-def get_all_internal_links(base_url):
-    """
-    Crawls the website starting from base_url to find all internal links.
-    Ensures all pages under the given base_url are discovered.
-    """
+def get_all_internal_links(base_url, session):
     visited = set()
     queue = deque([base_url])
     all_links = set([base_url])
@@ -138,53 +278,66 @@ def get_all_internal_links(base_url):
         visited.add(current_url)
         logging.info(f"Discovering links on: {current_url}")
         
-        soup = fetch_html(current_url)
+        soup = fetch_html(current_url, session)
         if not soup:
             continue
             
         for a_tag in soup.find_all('a', href=True):
             href = a_tag['href']
-            # Ignore anchor links, mailto, etc.
             if href.startswith(('mailto:', 'tel:', 'javascript:', '#')):
                 continue
                 
             full_url = urljoin(current_url, href)
-            # Remove fragments
             full_url = full_url.split('#')[0]
             
             parsed_url = urlparse(full_url)
             
-            # Check if it belongs to the same domain and starts with the base path '/en'
             if parsed_url.netloc == base_domain and parsed_url.path.startswith(base_path):
-                # Ensure it's not a file download (like .pdf, .doc) for HTML processing
-                if not full_url.lower().endswith(('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.zip', '.rar')):
+                # We skip obviously non-text extensions, but keep pdf and doc/docx
+                if not full_url.lower().endswith(('.xls', '.xlsx', '.zip', '.rar', '.jpg', '.png', '.jpeg')):
                     if full_url not in all_links:
                         all_links.add(full_url)
-                        queue.append(full_url)
+                        
+                        # Only append HTML pages to the queue, prevent fetching HTML tags from a PDF!
+                        if not full_url.lower().endswith(('.pdf', '.doc', '.docx')):
+                            queue.append(full_url)
                         
     return list(all_links)
 
 def main():
     base_url = "https://sp-ie.metu.edu.tr/en"
+    session = requests.Session()
+    
+    # 0. Attempt Login using environment variables
+    perform_login(session)
+    
     logging.info(f"Starting crawl to find all pages under: {base_url}")
     
     # 1. Discover all internal pages
-    urls_to_scrape = get_all_internal_links(base_url)
-    logging.info(f"Found {len(urls_to_scrape)} unique pages to scrape.")
+    urls_to_scrape = get_all_internal_links(base_url, session)
+    logging.info(f"Found {len(urls_to_scrape)} unique pages/documents to scrape.")
     
     final_dataset = []
     
-    # 2. Iterate over ALL found pages and extract data
+    # 2. Iterate over ALL found pages and documents and extract data
     for url in urls_to_scrape:
         logging.info(f"Scraping content from: {url}")
         
-        soup = fetch_html(url)
-        if not soup:
-            continue
-            
-        page_title = soup.title.string.strip() if soup.title else ""
+        page_title = url.split('/')[-1] if not url.endswith('/') else url.split('/')[-2]
+        cleaned_text = ""
         
-        cleaned_text = clean_data(soup)
+        if url.lower().endswith('.pdf'):
+            cleaned_text = fetch_pdf_text(url, session)
+        elif url.lower().endswith('.docx'):
+            cleaned_text = fetch_docx_text(url, session)
+        elif url.lower().endswith('.doc'):
+            cleaned_text = fetch_doc_text(url, session)
+        else:
+            soup = fetch_html(url, session)
+            if soup:
+                title_tag = soup.title
+                page_title = title_tag.string.strip() if title_tag and title_tag.string else page_title
+                cleaned_text = clean_data(soup)
         
         if cleaned_text:
             chunks = chunk_text(cleaned_text)

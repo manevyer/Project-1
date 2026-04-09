@@ -9,3 +9,7 @@ torch --index-url https://download.pytorch.org/whl/cpu
 chromadb
 pysqlite3-binary
 tqdm
+python-dotenv
+pypdf
+python-docx
+Spire.Doc
