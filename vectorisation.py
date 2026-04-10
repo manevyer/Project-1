@@ -42,7 +42,7 @@ from chromadb.utils import embedding_functions
 class DataProcessor:
     """Class to handle data loading, extraction, and chunking."""
     
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50):
+    def __init__(self, chunk_size: int = 1200, chunk_overlap: int = 50):
         """
         Initialize the text splitter.
         

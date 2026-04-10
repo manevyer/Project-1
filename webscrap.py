@@ -215,6 +215,39 @@ def chunk_text(text):
             chunks.append(current_chunk)
         return chunks
 
+def generate_queries_with_ollama(chunk_text, max_retries=2):
+    url = "http://localhost:11434/api/generate"
+    prompt = f"""Based on the following text about university internships, write exactly 3 realistic questions that a student might ask to get this information.
+Write 2 questions in Turkish and 1 question in English.
+Provide ONLY the questions, one per line, without any numbering or extra text.
+
+Text:
+{chunk_text[:1000]}
+"""
+    payload = {
+        "model": "llama3.2:latest",
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.1
+        }
+    }
+    
+    for _ in range(max_retries):
+        try:
+            response = requests.post(url, json=payload, timeout=20)
+            if response.status_code == 200:
+                result = response.json().get('response', '')
+                # Clean up the output to ensure we just get strings
+                questions = [q.strip('- *."\'1234567890') for q in result.strip().split('\n') if q.strip()]
+                if len(questions) >= 1:
+                    return questions[:3]
+        except Exception as e:
+            logging.warning(f"Ollama query generation failed: {e}")
+            break
+            
+    return None
+
 def format_to_json(chunks, source_url, page_title):
     dataset = []
     
@@ -233,13 +266,20 @@ def format_to_json(chunks, source_url, page_title):
         elif 'step' in lower_chunk or 'apply' in lower_chunk or 'application' in lower_chunk:
             topic = "Application Steps and Procedures"
             
+        logging.info(f"Generating queries with local LLM for chunk {i+1}/{len(chunks)}...")
+        generated_questions = generate_queries_with_ollama(chunk)
+        
+        # Fallback to smart generic bilingual questions if Ollama fails or is not running
+        if not generated_questions:
+            generated_questions = [
+                f"What is the information regarding {topic.lower()}?",
+                f"Bana {topic} hakkında bilgi verebilir misiniz?",
+                f"IE staj süreciyle ilgili {topic.lower()} detayları nelerdir?"
+            ]
+
         entry = {
             "topic": topic,
-            "user_query_variations": [
-                f"What is the information regarding {topic.lower()}?",
-                f"Can you provide details about {topic.lower()}?",
-                f"Tell me about {topic.lower()} from the IE summer practice site."
-            ],
+            "user_query_variations": generated_questions,
             "chatbot_response": chunk
         }
         dataset.append(entry)
