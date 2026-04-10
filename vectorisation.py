@@ -1,38 +1,26 @@
 """
 vectorisation.py
 
-An end-to-end script for data loading, text extraction, cleaning, chunking,
+An end-to-end script for data loading, text cleaning, deduplication,
 vectorization, and database persistence using ChromaDB and sentence-transformers.
+
+Key design decisions:
+- Only 'chatbot_response' is embedded; 'topic' is stored as metadata.
+  This prevents LLM-generated query variations from polluting the embedding space.
+- Chunking happens ONLY here (single-point chunking), not in webscrap.py,
+  to avoid the double-chunking problem.
+- chunk_size=800 keeps chunks within the 512-token limit of multilingual-e5-small.
 """
 
 import os
+import re
 import json
 import glob
 import logging
-import subprocess
-import sys
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Optional, Tuple
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-
-def install_requirements():
-    """Installs required packages if they are not already installed."""
-    try:
-        import langchain_text_splitters
-        import chromadb
-        import sentence_transformers
-    except ImportError:
-        logging.info("Missing required packages. Installing them now...")
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
-            logging.info("Packages installed successfully.")
-        except Exception as e:
-            logging.error(f"Failed to install packages automatically: {e}")
-            logging.info("Please run: pip install -r requirements.txt")
-
-# Call the installation before importing 3rd party libraries
-install_requirements()
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import chromadb
@@ -40,68 +28,58 @@ from chromadb.utils import embedding_functions
 
 
 class DataProcessor:
-    """Class to handle data loading, extraction, and chunking."""
+    """Class to handle data loading, extraction, cleaning, and preparation for vectorization."""
     
-    def __init__(self, chunk_size: int = 1200, chunk_overlap: int = 50):
+    def __init__(self, chunk_size: int = 800, chunk_overlap: int = 100):
         """
-        Initialize the text splitter.
+        Initialize the text splitter for handling oversized entries.
         
         Args:
             chunk_size (int): The maximum size of each text chunk.
             chunk_overlap (int): The number of overlapping characters between chunks.
         """
+        self.chunk_size = chunk_size
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             separators=["\n\n", "\n", " ", ""]
         )
 
-    def extract_text_from_item(self, item: Any) -> str:
-        """
-        Flexibly extracts text from a JSON object.
-        Looks for common keys like 'text', 'question', 'answer', 'chatbot_response', etc.
-        """
-        if isinstance(item, str):
-            return item.strip()
+    @staticmethod
+    def _clean_text(text: str) -> str:
+        """Clean and normalize text for embedding quality."""
+        # Normalize line endings and whitespace
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        text = re.sub(r'\t+', ' ', text)
         
-        extracted = []
-        if isinstance(item, dict):
-            # Target keys prioritized for RAG
-            target_keys = ['topic', 'question', 'answer', 'text', 'chatbot_response', 'user_query_variations']
-            
-            found_target = False
-            for key in target_keys:
-                if key in item:
-                    val = item[key]
-                    if isinstance(val, list):
-                        # Join lists into a single string (useful for query variations)
-                        extracted.append(" ".join([str(v) for v in val]))
-                    else:
-                        extracted.append(str(val))
-                    found_target = True
-            
-            # Fallback if no specific keys are found: extract all string values
-            if not found_target:
-                for val in item.values():
-                    if isinstance(val, str):
-                        extracted.append(val)
-                    elif isinstance(val, list):
-                        extracted.extend([str(v) for v in val if isinstance(v, str)])
-                        
-        return "\n".join(extracted).strip()
+        # Remove form template noise (empty fields, dot/underscore patterns)
+        text = re.sub(r'\.{3,}', '', text)
+        text = re.sub(r'_{3,}', '', text)
+        
+        # Collapse excessive whitespace
+        text = re.sub(r'[ ]+', ' ', text)
+        text = re.sub(r'\n\s*\n+', '\n\n', text)
+        
+        return text.strip()
 
-    def load_and_merge_json(self, directory: str, specific_files: Optional[List[str]] = None) -> List[str]:
+    def load_and_prepare(self, directory: str, specific_files: Optional[List[str]] = None) -> Tuple[List[str], List[Dict]]:
         """
-        Reads JSON files in a directory and extracts text.
+        Load JSON files and prepare documents with metadata for vectorization.
+        
+        Only the 'chatbot_response' field is used as the document text for embedding.
+        The 'topic' is stored as searchable metadata, preventing LLM-generated 
+        query variations from polluting the embedding space.
         
         Args:
             directory (str): The folder containing JSON files.
             specific_files (Optional[List[str]]): List of specific filenames to process.
             
         Returns:
-            List[str]: A list of extracted text strings.
+            Tuple of (documents, metadatas) ready for ChromaDB.
         """
-        texts = []
+        documents = []
+        metadatas = []
+        
         search_pattern = os.path.join(directory, "*.json")
         file_paths = glob.glob(search_pattern)
         
@@ -113,41 +91,75 @@ class DataProcessor:
             try:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
+                
+                if not isinstance(data, list):
+                    data = [data]
                     
-                # Handle cases where json contains a list of objects or a single object
-                if isinstance(data, list):
-                    for item in data:
-                        text = self.extract_text_from_item(item)
-                        if text:
-                            texts.append(text)
-                else:
-                    text = self.extract_text_from_item(data)
-                    if text:
-                        texts.append(text)
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    
+                    # Extract the primary content for embedding
+                    text = item.get("chatbot_response", "")
+                    if isinstance(text, list):
+                        text = " ".join(str(v) for v in text)
+                    text = self._clean_text(str(text))
+                    
+                    # Skip very short or empty entries — these are typically form titles
+                    if len(text) < 50:
+                        logging.debug(f"Skipping short entry ({len(text)} chars): {text[:50]}")
+                        continue
                         
+                    # Extract metadata fields
+                    topic = str(item.get("topic", "")).strip()
+                    
+                    # Prepare metadata dict
+                    meta = {
+                        "topic": topic,
+                        "source_file": os.path.basename(file_path),
+                    }
+                    
+                    # If text fits within chunk_size, use as-is; otherwise chunk it
+                    if len(text) <= self.chunk_size:
+                        documents.append(text)
+                        metadatas.append(meta)
+                    else:
+                        # Chunk long texts and distribute metadata
+                        chunks = self.splitter.split_text(text)
+                        for j, chunk in enumerate(chunks):
+                            if chunk.strip() and len(chunk.strip()) >= 50:
+                                documents.append(chunk.strip())
+                                chunk_meta = meta.copy()
+                                chunk_meta["chunk_part"] = j + 1
+                                metadatas.append(chunk_meta)
+                                
             except json.JSONDecodeError as e:
                 logging.error(f"Error decoding JSON in file {file_path}: {e}")
             except Exception as e:
                 logging.error(f"Unexpected error reading {file_path}: {e}")
-                
-        return texts
-
-    def chunk_texts(self, texts: List[str]) -> List[str]:
-        """
-        Splits texts into smaller manageable chunks.
         
-        Args:
-            texts (List[str]): List of extracted string texts.
-            
-        Returns:
-            List[str]: List of chunked texts.
-        """
-        logging.info("Chunking texts...")
-        # create_documents returns Document objects, we just need the text for ChromaDB
-        docs = self.splitter.create_documents(texts)
-        chunks = [doc.page_content for doc in docs if doc.page_content.strip()]
-        logging.info(f"Generated {len(chunks)} text chunks.")
-        return chunks
+        logging.info(f"Prepared {len(documents)} documents from {len(file_paths)} files.")
+        return documents, metadatas
+
+    @staticmethod
+    def deduplicate(documents: List[str], metadatas: List[Dict]) -> Tuple[List[str], List[Dict]]:
+        """Remove duplicate documents based on content similarity (first 200 chars)."""
+        seen = set()
+        deduped_docs = []
+        deduped_meta = []
+        
+        for doc, meta in zip(documents, metadatas):
+            key = doc.strip()[:200]
+            if key not in seen:
+                seen.add(key)
+                deduped_docs.append(doc)
+                deduped_meta.append(meta)
+        
+        removed = len(documents) - len(deduped_docs)
+        if removed > 0:
+            logging.info(f"Deduplication removed {removed} duplicate entries.")
+        
+        return deduped_docs, deduped_meta
 
 
 class VectorDatabaseManager:
@@ -172,15 +184,16 @@ class VectorDatabaseManager:
         # Initialize the persistent ChromaDB client
         self.client = chromadb.PersistentClient(path=self.persist_directory)
 
-    def create_and_store_embeddings(self, chunks: List[str]):
+    def create_and_store_embeddings(self, documents: List[str], metadatas: Optional[List[Dict]] = None):
         """
-        Converts text chunks into vectors and saves them to the vector database.
+        Converts text documents into vectors and saves them to the vector database.
         
         Args:
-            chunks (List[str]): List of text chunks to be embedded.
+            documents (List[str]): List of text documents to be embedded.
+            metadatas (Optional[List[Dict]]): List of metadata dicts corresponding to each document.
         """
-        if not chunks:
-            logging.warning("No chunks provided to vectorize.")
+        if not documents:
+            logging.warning("No documents provided to vectorize.")
             return
 
         try:
@@ -189,33 +202,34 @@ class VectorDatabaseManager:
         except Exception:
             pass
             
-        # Get or create collection freshly
+        # Create collection fresh
         collection = self.client.create_collection(
             name=self.collection_name, 
             embedding_function=self.embedding_fn
         )
         
         # Prepare batch payloads
-        ids = [f"chunk_{i}" for i in range(len(chunks))]
-        metadatas = [{"chunk_id": i} for i in range(len(chunks))]
+        ids = [f"doc_{i}" for i in range(len(documents))]
+        if metadatas is None:
+            metadatas = [{"doc_id": i} for i in range(len(documents))]
         
-        logging.info("Adding chunks to Vector Database (this may take a while depending on chunk size)...")
-        # ChromaDB handles batching internally, but we add it in chunks just in case memory issues arise
+        logging.info(f"Adding {len(documents)} documents to Vector Database (this may take a while)...")
+        # ChromaDB handles batching internally, but we add in chunks for memory safety
         batch_size = 5000
-        for i in range(0, len(chunks), batch_size):
-            end_idx = min(i + batch_size, len(chunks))
+        for i in range(0, len(documents), batch_size):
+            end_idx = min(i + batch_size, len(documents))
             collection.add(
-                documents=chunks[i:end_idx],
+                documents=documents[i:end_idx],
                 metadatas=metadatas[i:end_idx],
                 ids=ids[i:end_idx]
             )
-            logging.info(f"Stored chunks {i} to {end_idx - 1}")
+            logging.info(f"Stored documents {i} to {end_idx - 1}")
             
-        logging.info(f"Successfully stored all chunks in ChromaDB at {self.persist_directory}")
+        logging.info(f"Successfully stored all {len(documents)} documents in ChromaDB at {self.persist_directory}")
 
     def load_existing_db(self):
         """
-        Helper function to demonstrate how to load the database later.
+        Helper function to load the existing database for querying.
         
         Returns:
             Collection: The loaded ChromaDB collection ready for querying.
@@ -235,22 +249,21 @@ def main():
     DATA_DIR = "./"  # Directory containing JSON files
     DB_DIR = "./vector_db" # Directory to save the vector DB
     
-    # Define specific files to target if necessary
+    # Define specific files to target
     target_files = ["metu_ie_chatbot_dataset.json", "custom_faqs.json"]
     
-    # 1. Initialize Processor
-    processor = DataProcessor(chunk_size=1500, chunk_overlap=150)
+    # 1. Initialize Processor with safe chunk size for multilingual-e5-small (max 512 tokens)
+    processor = DataProcessor(chunk_size=800, chunk_overlap=100)
     
-    # 2. Load and merge data flexibly
-    # You can set specific_files=None to process all JSONs in DATA_DIR
-    extracted_texts = processor.load_and_merge_json(directory=DATA_DIR, specific_files=target_files)
+    # 2. Load and prepare data with metadata (single-point chunking, no double chunking)
+    documents, metadatas = processor.load_and_prepare(directory=DATA_DIR, specific_files=target_files)
     
-    if not extracted_texts:
-        logging.error("No texts extracted. Exiting pipeline.")
+    if not documents:
+        logging.error("No documents extracted. Exiting pipeline.")
         return
-        
-    # 3. Clean and Chunk texts
-    chunks = processor.chunk_texts(extracted_texts)
+    
+    # 3. Deduplicate
+    documents, metadatas = processor.deduplicate(documents, metadatas)
     
     # 4. Vectorize and save to Database
     # Using 'intfloat/multilingual-e5-small' for Turkish/English compatibility
@@ -260,18 +273,20 @@ def main():
         model_name="intfloat/multilingual-e5-small"
     )
     
-    db_manager.create_and_store_embeddings(chunks)
+    db_manager.create_and_store_embeddings(documents, metadatas)
     
     # 5. Demonstration: Load the database and make a test query
     logging.info("Testing the loaded database...")
     loaded_collection = db_manager.load_existing_db()
     results = loaded_collection.query(
-        query_texts=["What are the IE 300 internship requirements?"],
-        n_results=1
+        query_texts=["IE 400 stajı için ön koşullar nelerdir?"],
+        n_results=3
     )
     
-    logging.info("Sample query result:")
-    logging.info(results["documents"])
+    logging.info("Sample query results:")
+    if results and results["documents"]:
+        for i, (doc, meta) in enumerate(zip(results["documents"][0], results["metadatas"][0])):
+            logging.info(f"  Result {i+1} (topic: {meta.get('topic', 'N/A')}): {doc[:100]}...")
 
 
 if __name__ == "__main__":

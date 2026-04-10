@@ -6,6 +6,8 @@ import json
 import logging
 from urllib.parse import urljoin, urlparse
 from collections import deque
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 import io
 
@@ -176,6 +178,10 @@ def clean_data(soup):
     else:
         text = soup.body.get_text(separator='\n', strip=True) if soup.body else soup.get_text(separator='\n', strip=True)
         
+    # Clean form template noise (empty fields, dot/underscore patterns)
+    text = re.sub(r'\.{3,}', '', text)           # "......" patterns
+    text = re.sub(r'_{3,}', '', text)             # "______" patterns
+    
     # Improve whitespace cleaning to prevent formatting issues 
     text = re.sub(r'[\r\t\f\v ]+', ' ', text) # Replace horizontal spaces with a single space
     text = re.sub(r'\n\s*\n+', '\n\n', text)  # Replace multiple newlines with double newline to preserve paragraph separation
@@ -217,9 +223,14 @@ def chunk_text(text):
 
 def generate_queries_with_ollama(chunk_text, max_retries=2):
     url = "http://localhost:11434/api/generate"
-    prompt = f"""Based on the following text about university internships, write exactly 3 realistic questions that a student might ask to get this information.
-Write 2 questions in Turkish and 1 question in English.
-Provide ONLY the questions, one per line, without any numbering or extra text.
+    prompt = f"""You are helping create a university internship FAQ dataset. Read the following text carefully and write exactly 3 specific, realistic questions that a student would ask to find this exact information.
+
+Rules:
+- Write 2 questions in Turkish and 1 in English.
+- Questions must be directly answerable by the given text.
+- Be specific: refer to form names, deadlines, course codes (IE 300, IE 400), or procedures mentioned in the text.
+- Do NOT write generic questions. Each question should be unique to this content.
+- Provide ONLY the questions, one per line, without numbering, bullets, or extra text.
 
 Text:
 {chunk_text[:1000]}
@@ -331,6 +342,12 @@ def main():
     base_url = "https://sp-ie.metu.edu.tr/en"
     session = requests.Session()
     
+    # Add retry strategy for robustness against transient network errors
+    retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    
     # 0. Attempt Login using environment variables
     perform_login(session)
     
@@ -368,6 +385,20 @@ def main():
             final_dataset.extend(json_data)
         else:
             logging.warning(f"No content extracted from {url}")
+
+    # 2.5. Deduplicate entries with identical content
+    seen_content = set()
+    deduped_dataset = []
+    for entry in final_dataset:
+        content_key = entry["chatbot_response"].strip()[:200]
+        if content_key not in seen_content:
+            seen_content.add(content_key)
+            deduped_dataset.append(entry)
+    
+    removed_count = len(final_dataset) - len(deduped_dataset)
+    if removed_count > 0:
+        logging.info(f"Removed {removed_count} duplicate entries.")
+    final_dataset = deduped_dataset
 
     # 3. Save to JSON file locally
     output_filename = "metu_ie_chatbot_dataset.json"
