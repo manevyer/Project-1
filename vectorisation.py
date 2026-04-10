@@ -5,8 +5,8 @@ An end-to-end script for data loading, text cleaning, deduplication,
 vectorization, and database persistence using ChromaDB and sentence-transformers.
 
 Key design decisions:
-- Only 'chatbot_response' is embedded; 'topic' is stored as metadata.
-  This prevents LLM-generated query variations from polluting the embedding space.
+- Only 'content' (page text) is embedded; 'title' and 'url' are stored as metadata.
+- Supports both new format ('content'/'title'/'url') and legacy format ('chatbot_response'/'topic').
 - Chunking happens ONLY here (single-point chunking), not in webscrap.py,
   to avoid the double-chunking problem.
 - chunk_size=800 keeps chunks within the 512-token limit of multilingual-e5-small.
@@ -66,9 +66,8 @@ class DataProcessor:
         """
         Load JSON files and prepare documents with metadata for vectorization.
         
-        Only the 'chatbot_response' field is used as the document text for embedding.
-        The 'topic' is stored as searchable metadata, preventing LLM-generated 
-        query variations from polluting the embedding space.
+        Only the 'content' field (or 'chatbot_response' for legacy data) is used as the
+        document text for embedding. The 'title' and 'url' are stored as searchable metadata.
         
         Args:
             directory (str): The folder containing JSON files.
@@ -100,7 +99,8 @@ class DataProcessor:
                         continue
                     
                     # Extract the primary content for embedding
-                    text = item.get("chatbot_response", "")
+                    # Supports both new format ("content") and old format ("chatbot_response")
+                    text = item.get("content", "") or item.get("chatbot_response", "")
                     if isinstance(text, list):
                         text = " ".join(str(v) for v in text)
                     text = self._clean_text(str(text))
@@ -110,12 +110,14 @@ class DataProcessor:
                         logging.debug(f"Skipping short entry ({len(text)} chars): {text[:50]}")
                         continue
                         
-                    # Extract metadata fields
-                    topic = str(item.get("topic", "")).strip()
+                    # Extract metadata fields (supports both new and old format)
+                    topic = str(item.get("title", "") or item.get("topic", "")).strip()
+                    url = str(item.get("url", "")).strip()
                     
                     # Prepare metadata dict
                     meta = {
                         "topic": topic,
+                        "source_url": url,
                         "source_file": os.path.basename(file_path),
                     }
                     

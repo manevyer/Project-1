@@ -1,3 +1,13 @@
+"""
+webscrap.py
+
+Crawls the METU IE Summer Practice website and extracts content from
+HTML pages, PDFs, and DOC/DOCX files. Outputs a simple JSON dataset
+with one entry per page/document containing url, title, and raw content.
+
+Chunking, deduplication, and vectorization are handled by vectorisation.py.
+"""
+
 import os
 import re
 import requests
@@ -28,14 +38,9 @@ try:
 except ImportError:
     Document = None
 
-# Langchain splitter
-try:
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-except ImportError:
-    RecursiveCharacterTextSplitter = None
-
 # Set up logging for error handling and progress tracking
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
 
 def perform_login(session):
     """
@@ -87,6 +92,42 @@ def fetch_html(url, session):
         logging.error(f"Failed to fetch HTML {url}: {e}")
         return None
 
+def clean_raw_text(text):
+    """
+    Clean raw text from any source (HTML, PDF, DOC).
+    Removes form template noise and normalizes whitespace.
+    """
+    if not text:
+        return ""
+    # Remove form template noise
+    text = re.sub(r'\.{3,}', '', text)           # "......." patterns
+    text = re.sub(r'_{3,}', '', text)             # "________" patterns
+    # Normalize whitespace
+    text = re.sub(r'[\r\t\f\v ]+', ' ', text)
+    text = re.sub(r'\n\s*\n+', '\n\n', text)
+    return text.strip()
+
+def _clean_document_title(filename):
+    """Convert document filenames like 'sp_application_form_ie400_eng_0.pdf' to readable titles."""
+    if not any(filename.lower().endswith(ext) for ext in ['.pdf', '.doc', '.docx']):
+        return filename
+    
+    name = filename.rsplit('.', 1)[0]           # remove extension
+    name = re.sub(r'_\d+$', '', name)           # remove version suffix (_0, _1)
+    name = name.replace('_', ' ').replace('-', ' ')
+    name = name.title()
+    
+    # Fix known abbreviations to uppercase
+    name = re.sub(r'\bIe\s*(\d)', r'IE \1', name)   # "Ie 300" → "IE 300"
+    name = re.sub(r'\bIe(\d)', r'IE \1', name)       # "Ie300" → "IE 300"
+    name = re.sub(r'\bSp\b', 'SP', name)
+    name = re.sub(r'\bSgk\b', 'SGK', name)
+    name = re.sub(r'\bOhs\b', 'OHS', name)
+    name = re.sub(r'\bEng\b', '(EN)', name)
+    name = re.sub(r'\bTr\b', '(TR)', name)
+    
+    return name
+
 def fetch_pdf_text(url, session):
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -104,7 +145,7 @@ def fetch_pdf_text(url, session):
             t = page.extract_text()
             if t:
                 text += t + "\n"
-        return text
+        return clean_raw_text(text)
     except Exception as e:
         logging.error(f"Failed to read PDF {url}: {e}")
         return ""
@@ -122,7 +163,7 @@ def fetch_docx_text(url, session):
         docx_file = io.BytesIO(response.content)
         doc = docx.Document(docx_file)
         text = "\n".join([para.text for para in doc.paragraphs])
-        return text
+        return clean_raw_text(text)
     except Exception as e:
         logging.error(f"Failed to read DOCX {url}: {e}")
         return ""
@@ -151,12 +192,13 @@ def fetch_doc_text(url, session):
             os.remove(temp_path)
             
         text = text.replace("Evaluation Warning: The document was created with Spire.Doc for Python.", "")
-        return text.strip()
+        return clean_raw_text(text)
     except Exception as e:
         logging.error(f"Failed to read DOC {url}: {e}")
         return ""
 
 def clean_data(soup):
+    """Extract and clean text content from an HTML page."""
     if not soup:
         return ""
     
@@ -177,125 +219,8 @@ def clean_data(soup):
         text = main_content.get_text(separator='\n', strip=True)
     else:
         text = soup.body.get_text(separator='\n', strip=True) if soup.body else soup.get_text(separator='\n', strip=True)
-        
-    # Clean form template noise (empty fields, dot/underscore patterns)
-    text = re.sub(r'\.{3,}', '', text)           # "......" patterns
-    text = re.sub(r'_{3,}', '', text)             # "______" patterns
     
-    # Improve whitespace cleaning to prevent formatting issues 
-    text = re.sub(r'[\r\t\f\v ]+', ' ', text) # Replace horizontal spaces with a single space
-    text = re.sub(r'\n\s*\n+', '\n\n', text)  # Replace multiple newlines with double newline to preserve paragraph separation
-    
-    return text.strip()
-
-def chunk_text(text):
-    if RecursiveCharacterTextSplitter:
-        # Use LangChain Text Splitter to prevent breaking words and missing data optimally
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=700, 
-            chunk_overlap=100,
-            separators=["\n\n", "\n", " ", ""]
-        )
-        return splitter.split_text(text)
-    else:
-        # Fallback 
-        raw_chunks = text.split('\n\n')
-        chunks = []
-        current_chunk = ""
-        
-        for raw in raw_chunks:
-            raw = raw.strip()
-            if not raw:
-                continue
-            if len(current_chunk) + len(raw) < 500:
-                if current_chunk:
-                    current_chunk += "\n\n" + raw
-                else:
-                    current_chunk = raw
-            else:
-                if current_chunk:
-                    chunks.append(current_chunk)
-                current_chunk = raw
-                
-        if current_chunk:
-            chunks.append(current_chunk)
-        return chunks
-
-def generate_queries_with_ollama(chunk_text, max_retries=2):
-    url = "http://localhost:11434/api/generate"
-    prompt = f"""You are helping create a university internship FAQ dataset. Read the following text carefully and write exactly 3 specific, realistic questions that a student would ask to find this exact information.
-
-Rules:
-- Write 2 questions in Turkish and 1 in English.
-- Questions must be directly answerable by the given text.
-- Be specific: refer to form names, deadlines, course codes (IE 300, IE 400), or procedures mentioned in the text.
-- Do NOT write generic questions. Each question should be unique to this content.
-- Provide ONLY the questions, one per line, without numbering, bullets, or extra text.
-
-Text:
-{chunk_text[:1000]}
-"""
-    payload = {
-        "model": "gemma3:12b",
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "temperature": 0.1
-        }
-    }
-    
-    for _ in range(max_retries):
-        try:
-            response = requests.post(url, json=payload, timeout=150)
-            if response.status_code == 200:
-                result = response.json().get('response', '')
-                # Clean up the output to ensure we just get strings
-                questions = [q.strip('- *."\'1234567890') for q in result.strip().split('\n') if q.strip()]
-                if len(questions) >= 1:
-                    return questions[:3]
-        except Exception as e:
-            logging.warning(f"Ollama query generation failed: {e}")
-            break
-            
-    return None
-
-def format_to_json(chunks, source_url, page_title):
-    dataset = []
-    
-    for i, chunk in enumerate(chunks):
-        topic = f"{page_title} - Section {i+1}" if page_title else f"Information from {source_url} - Section {i+1}"
-        
-        lower_chunk = chunk.lower()
-        if 'ie 300' in lower_chunk or 'ie300' in lower_chunk:
-            topic = "IE 300 Internship Requirements"
-        elif 'ie 400' in lower_chunk or 'ie400' in lower_chunk:
-            topic = "IE 400 Internship Requirements"
-        elif 'document' in lower_chunk or 'form' in lower_chunk:
-            topic = "Required Documents and Forms"
-        elif 'deadline' in lower_chunk or 'date' in lower_chunk:
-            topic = "Deadlines and Important Dates"
-        elif 'step' in lower_chunk or 'apply' in lower_chunk or 'application' in lower_chunk:
-            topic = "Application Steps and Procedures"
-            
-        logging.info(f"Generating queries with local LLM for chunk {i+1}/{len(chunks)}...")
-        generated_questions = generate_queries_with_ollama(chunk)
-        
-        # Fallback to smart generic bilingual questions if Ollama fails or is not running
-        if not generated_questions:
-            generated_questions = [
-                f"What is the information regarding {topic.lower()}?",
-                f"Bana {topic} hakkında bilgi verebilir misiniz?",
-                f"IE staj süreciyle ilgili {topic.lower()} detayları nelerdir?"
-            ]
-
-        entry = {
-            "topic": topic,
-            "user_query_variations": generated_questions,
-            "chatbot_response": chunk
-        }
-        dataset.append(entry)
-        
-    return dataset
+    return clean_raw_text(text)
 
 def get_all_internal_links(base_url, session):
     visited = set()
@@ -359,12 +284,16 @@ def main():
     
     final_dataset = []
     
-    # 2. Iterate over ALL found pages and documents and extract data
+    # 2. Iterate over ALL found pages and documents and extract content
     for url in urls_to_scrape:
         logging.info(f"Scraping content from: {url}")
         
         page_title = url.split('/')[-1] if not url.endswith('/') else url.split('/')[-2]
         cleaned_text = ""
+        
+        # For document files, convert filename to a human-readable title
+        if any(url.lower().endswith(ext) for ext in ['.pdf', '.doc', '.docx']):
+            page_title = _clean_document_title(page_title)
         
         if url.lower().endswith('.pdf'):
             cleaned_text = fetch_pdf_text(url, session)
@@ -380,32 +309,44 @@ def main():
                 cleaned_text = clean_data(soup)
         
         if cleaned_text:
-            chunks = chunk_text(cleaned_text)
-            json_data = format_to_json(chunks, url, page_title)
-            final_dataset.extend(json_data)
+            final_dataset.append({
+                "url": url,
+                "title": page_title,
+                "content": cleaned_text
+            })
         else:
             logging.warning(f"No content extracted from {url}")
 
-    # 2.5. Deduplicate entries with identical content
+    # 2.5. Deduplicate entries (by normalized URL and by exact content)
+    # URL normalization strips version suffixes (_0, _1) from document filenames
+    # so ie300-manual_0.pdf and ie300-manual_1.pdf are caught as duplicates,
+    # while IE 300 vs IE 400 variants (different base names) are preserved.
+    seen_urls = set()
     seen_content = set()
-    deduped_dataset = []
+    deduped = []
     for entry in final_dataset:
-        content_key = entry["chatbot_response"].strip()[:200]
-        if content_key not in seen_content:
-            seen_content.add(content_key)
-            deduped_dataset.append(entry)
+        url_key = entry['url'].rstrip('/')
+        # Normalize versioned document URLs: strip _0, _1 etc. before extension
+        url_key = re.sub(r'_\d+\.(pdf|doc|docx)$', r'.\1', url_key)
+        content_key = hash(entry['content'].strip())
+        if url_key in seen_urls or content_key in seen_content:
+            logging.info(f"Removed duplicate: {entry['title']}")
+            continue
+        seen_urls.add(url_key)
+        seen_content.add(content_key)
+        deduped.append(entry)
     
-    removed_count = len(final_dataset) - len(deduped_dataset)
-    if removed_count > 0:
-        logging.info(f"Removed {removed_count} duplicate entries.")
-    final_dataset = deduped_dataset
+    removed = len(final_dataset) - len(deduped)
+    if removed > 0:
+        logging.info(f"Deduplication removed {removed} entries.")
+    final_dataset = deduped
 
     # 3. Save to JSON file locally
     output_filename = "metu_ie_chatbot_dataset.json"
     try:
         with open(output_filename, 'w', encoding='utf-8') as f:
             json.dump(final_dataset, f, ensure_ascii=False, indent=2)
-        logging.info(f"Successfully scraped all information and saved {len(final_dataset)} entries to {output_filename}")
+        logging.info(f"Successfully scraped {len(final_dataset)} pages/documents to {output_filename}")
     except IOError as e:
         logging.error(f"Failed to save JSON file: {e}")
 
