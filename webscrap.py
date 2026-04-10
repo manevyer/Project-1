@@ -37,7 +37,7 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 def perform_login(session):
     """
-    Attempts to log in to the METU system using credentials from .env.
+    Attempts to log in to the METU system using credentials from .env via Basic Authentication.
     If no credentials are provided, simply returns False.
     """
     load_dotenv()
@@ -48,42 +48,25 @@ def perform_login(session):
         logging.info("No valid METU_USERNAME and METU_PASSWORD found in .env. Proceeding anonymously.")
         return False
         
-    login_url = "https://sp-ie.metu.edu.tr/en/user/login"
+    logging.info(f"Setting up Basic Authentication for {username}...")
+    session.auth = (username, password)
     
-    logging.info(f"Attempting to log in as {username}...")
+    # Test authentication against a protected page
+    test_url = "https://sp-ie.metu.edu.tr/en/forms"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
     
     try:
-        # First GET request to fetch form parameters like form_build_id (common in Drupal)
-        r = session.get(login_url, headers=headers)
-        soup = BeautifulSoup(r.content, 'html.parser')
-        
-        login_data = {
-            'name': username,
-            'pass': password,
-            'op': 'Log in'
-        }
-        
-        # Look for Drupal-specific form metadata
-        form_build_id_input = soup.find('input', {'name': 'form_build_id'})
-        form_id_input = soup.find('input', {'name': 'form_id'})
-        
-        if form_build_id_input:
-            login_data['form_build_id'] = form_build_id_input.get('value', '')
-        if form_id_input:
-            login_data['form_id'] = form_id_input.get('value', 'user_login')
-            
-        post_response = session.post(login_url, data=login_data, headers=headers)
-        post_response.raise_for_status()
-        
-        # Validating login context
-        if 'Log out' in post_response.text or 'Welcome' in post_response.text:
-            logging.info("Login successful!")
+        test_response = session.get(test_url, headers=headers)
+        if test_response.status_code == 200:
+            logging.info("Login successful (Basic Authentication)!")
             return True
+        elif test_response.status_code == 401:
+            logging.error("Login failed! Incorrect username or password for Basic Auth.")
+            return False
         else:
-            logging.warning("Login might have failed or the site acts differently. Scraping will proceed.")
+            logging.warning(f"Unexpected status code {test_response.status_code} during login check.")
             return False
             
     except Exception as e:
