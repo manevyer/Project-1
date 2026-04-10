@@ -225,7 +225,7 @@ Text:
 {chunk_text[:1000]}
 """
     payload = {
-        "model": "llama3.2:latest",
+        "model": "gemma3:12b",
         "prompt": prompt,
         "stream": False,
         "options": {
@@ -235,7 +235,7 @@ Text:
     
     for _ in range(max_retries):
         try:
-            response = requests.post(url, json=payload, timeout=20)
+            response = requests.post(url, json=payload, timeout=150)
             if response.status_code == 200:
                 result = response.json().get('response', '')
                 # Clean up the output to ensure we just get strings

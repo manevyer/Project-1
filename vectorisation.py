@@ -183,8 +183,14 @@ class VectorDatabaseManager:
             logging.warning("No chunks provided to vectorize.")
             return
 
-        # Get or create collection
-        collection = self.client.get_or_create_collection(
+        try:
+            self.client.delete_collection(name=self.collection_name)
+            logging.info(f"Deleted old ChromaDB collection '{self.collection_name}' to start fresh.")
+        except Exception:
+            pass
+            
+        # Get or create collection freshly
+        collection = self.client.create_collection(
             name=self.collection_name, 
             embedding_function=self.embedding_fn
         )

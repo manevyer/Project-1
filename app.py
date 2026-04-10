@@ -76,7 +76,7 @@ if prompt := st.chat_input("Staj başvurumu ne zamana kadar yapmalıyım?"):
         st.markdown(prompt)
 
     # 2. Fetch relevant documents from the Vector DB via semantic search (Top 3 docs)
-    results = vector_store.similarity_search(prompt, k=3)
+    results = vector_store.similarity_search(prompt, k=7)
     
     # Combine the retrieved documents to construct the context string
     retrieved_context = "\n\n---\n\n".join([doc.page_content for doc in results])
