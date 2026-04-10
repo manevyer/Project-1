@@ -239,7 +239,7 @@ def main():
     target_files = ["metu_ie_chatbot_dataset.json", "custom_faqs.json"]
     
     # 1. Initialize Processor
-    processor = DataProcessor(chunk_size=500, chunk_overlap=50)
+    processor = DataProcessor(chunk_size=1500, chunk_overlap=150)
     
     # 2. Load and merge data flexibly
     # You can set specific_files=None to process all JSONs in DATA_DIR
