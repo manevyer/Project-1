@@ -6,6 +6,7 @@ import streamlit as st
 from groq import Groq
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
+import time
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -31,22 +32,15 @@ client = Groq(api_key=GROQ_API_KEY)
 LLM_MODEL = "llama-3.3-70b-versatile"
 
 # --- VECTOR DATABASE LOADING ---
-# Using cache to prevent Streamlit from reloading the database on every user interaction.
+# Cached to avoid reloading on every Streamlit rerun.
 @st.cache_resource
 def load_vector_db():
     try:
-        # IMPORTANT NOTE: You must use the exact same embedding model here 
-        # that you used when initially creating the vectors.
-        # Defaulting to SentenceTransformers as it is standard and open-source.
-        # Update the model_name if you used OpenAI or a different HF model.
-        embeddings = HuggingFaceEmbeddings(model_name="intfloat/multilingual-e5-small")
-
-
-        # Using only relative file paths to ensure seamless deployment on Streamlit Cloud.
+        # Must match the embedding model used during vectorisation.
+        embeddings = HuggingFaceEmbeddings(model_name="intfloat/multilingual-e5-base")
+        # Relative path ensures Streamlit Cloud compatibility.
         db = Chroma(persist_directory="./vector_db", embedding_function=embeddings, collection_name="metu_chatbot")
         return db
-
-
     except Exception as e:
         st.error(f"🚨 An error occurred while loading the vector database: {e}")
         st.stop()
@@ -72,6 +66,21 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
     
+    # Export chat history as a downloadable text file
+    if st.session_state.get("messages"):
+        chat_lines = []
+        for msg in st.session_state.messages:
+            role = "🧑 Kullanıcı / User" if msg["role"] == "user" else "🤖 Danışman / Consultant"
+            chat_lines.append(f"{role}:\n{msg['content']}\n")
+        chat_export = ("\n" + "─" * 40 + "\n\n").join(chat_lines)
+        st.download_button(
+            "📥 Sohbeti İndir / Export Chat",
+            data=chat_export,
+            file_name="metu_ie_chat_export.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+    
     st.divider()
     st.markdown("### ℹ️ Hakkında / About")
     st.caption(
@@ -85,12 +94,12 @@ with st.sidebar:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Render previous messages on the screen
+# Render previous messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# --- EXAMPLE QUESTIONS (only shown when chat is empty) ---
+# --- EXAMPLE QUESTIONS (shown only when chat is empty) ---
 if not st.session_state.messages:
     st.markdown("### 💡 Örnek Sorular / Example Questions")
     examples = [
@@ -102,33 +111,40 @@ if not st.session_state.messages:
     cols = st.columns(2)
     for i, q in enumerate(examples):
         if cols[i % 2].button(q, key=f"example_{i}", use_container_width=True):
+            st.session_state["pending_question"] = q
             st.session_state.messages.append({"role": "user", "content": q})
             st.rerun()
 
 # --- USER INPUT AND RAG LOGIC ---
-if prompt := st.chat_input("Stajla ilgili sorunuzu yazın / Type your internship question..."):
-    
-    # 1. Display the user's message on the screen and save it to the session history
-    st.session_state.messages.append({"role": "user", "content": prompt})
+prompt = st.chat_input("Stajla ilgili sorunuzu yazın / Type your internship question...")
+
+# If an example button was clicked, use its question as the prompt
+if "pending_question" in st.session_state:
+    prompt = st.session_state.pop("pending_question")
+
+if prompt:
+    # 1. Save the user message and display it (skip display if already rendered above)
+    if not st.session_state.messages or st.session_state.messages[-1].get("content") != prompt:
+        st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # 2. Fetch relevant documents with similarity scores for quality filtering
+    # 2. Retrieve relevant documents with similarity scores
     raw_results = vector_store.similarity_search_with_score(prompt, k=10)
     
-    # Filter out low-relevance results (high distance = low relevance in cosine space)
+    # Filter out low-relevance results (high distance = low relevance)
     RELEVANCE_THRESHOLD = 1.5
     filtered_results = [(doc, score) for doc, score in raw_results if score < RELEVANCE_THRESHOLD]
     
-    # Ensure we keep at least 3 and at most 7 results for quality
+    # Clamp between 3–7 results for balanced context
     if len(filtered_results) < 3:
         filtered_results = raw_results[:3]
     elif len(filtered_results) > 7:
         filtered_results = filtered_results[:7]
-    
+
     results_docs = [doc for doc, score in filtered_results]
     
-    # Combine retrieved documents with source metadata so the LLM can cite links
+    # Build context with source metadata for LLM citation
     context_parts = []
     for doc in results_docs:
         source_url = doc.metadata.get("source_url", "")
@@ -139,12 +155,11 @@ if prompt := st.chat_input("Stajla ilgili sorunuzu yazın / Type your internship
         context_parts.append(f"{header}\n{doc.page_content}")
     retrieved_context = "\n\n---\n\n".join(context_parts)
 
-    # 3. Prepare the message payload for the Groq API
+    # 3. Prepare Groq API message payload
     api_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     
-    # Token-aware history management: include recent messages within a character budget
-    # to prevent overflowing the context window with old conversation turns.
-    MAX_HISTORY_CHARS = 4000  # ~1000 tokens safety margin
+    # Include recent history within a character budget to avoid context overflow
+    MAX_HISTORY_CHARS = 4000
     history_messages = []
     char_count = 0
     for msg in reversed(st.session_state.messages[:-1]):
@@ -160,42 +175,51 @@ if prompt := st.chat_input("Stajla ilgili sorunuzu yazın / Type your internship
     rag_enriched_prompt = f"User Question / Kullanıcının Sorusu: {prompt}\n\nDOCUMENT CONTEXT / DÖKÜMAN BAĞLAMI:\n{retrieved_context}"
     api_messages.append({"role": "user", "content": rag_enriched_prompt})
 
-    # 4. Groq API Call and Streaming the Response to the UI
+    # 4. Stream the Groq API response with automatic retry
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
         full_response = ""
         
-        try:
-            stream = client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=api_messages,
-                temperature=0.0, # ZERO temperature prevents hallucinations and ensures deterministic RAG outputs
-                stream=True
-            )
-            
-            # Stream the response chunks to create a typing effect
-            for chunk in stream:
-                if chunk.choices[0].delta.content is not None:
-                    full_response += chunk.choices[0].delta.content
-                    message_placeholder.markdown(full_response + "▌")
-            
-            # Remove the blinking cursor once the stream is complete
-            message_placeholder.markdown(full_response)
-            
-            with st.expander("📚 Kaynaklar / Sources"):
-                for i, (doc, score) in enumerate(filtered_results):
-                    topic = doc.metadata.get("topic", "Bilinmiyor")
-                    source_url = doc.metadata.get("source_url", "")
-                    if source_url:
-                        st.caption(f"**{i+1}.** [{topic}]({source_url}) (mesafe: {score:.3f})")
-                    else:
-                        st.caption(f"**{i+1}.** {topic} (mesafe: {score:.3f})")
-            
-        except Exception as e:
-            full_response = f"🚨 Groq API ile iletişimde bir hata oluştu: {e}"
-            message_placeholder.error(full_response)
-            # Do not save error messages to chat history to prevent context pollution
-            st.stop()
+        MAX_RETRIES = 3
+        for attempt in range(MAX_RETRIES):
+            try:
+                full_response = ""  # Reset on each retry attempt
+                stream = client.chat.completions.create(
+                    model=LLM_MODEL,
+                    messages=api_messages,
+                    temperature=0.0,  # Deterministic output for RAG accuracy
+                    stream=True
+                )
+                
+                # Stream chunks for typing effect
+                for chunk in stream:
+                    if chunk.choices[0].delta.content is not None:
+                        full_response += chunk.choices[0].delta.content
+                        message_placeholder.markdown(full_response + "▌")
+                
+                message_placeholder.markdown(full_response)
+                
+                with st.expander("📚 Kaynaklar / Sources"):
+                    for i, (doc, score) in enumerate(filtered_results):
+                        topic = doc.metadata.get("topic", "Bilinmiyor")
+                        source_url = doc.metadata.get("source_url", "")
+                        if source_url:
+                            st.caption(f"**{i+1}.** [{topic}]({source_url}) (mesafe: {score:.3f})")
+                        else:
+                            st.caption(f"**{i+1}.** {topic} (mesafe: {score:.3f})")
+                
+                break  # Success — exit retry loop
+                
+            except Exception as e:
+                if attempt < MAX_RETRIES - 1:
+                    message_placeholder.warning(
+                        f"⏳ Bağlantı hatası, tekrar deneniyor... ({attempt + 2}/{MAX_RETRIES})"
+                    )
+                    time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s
+                    continue
+                full_response = f"🚨 Groq API ile iletişimde bir hata oluştu: {e}"
+                message_placeholder.error(full_response)
+                st.stop()
 
-    # 5. Append the assistant's final response to the chat history
+    # 5. Save assistant response to history
     st.session_state.messages.append({"role": "assistant", "content": full_response})

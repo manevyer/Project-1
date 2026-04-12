@@ -1,11 +1,11 @@
 """
 webscrap.py
 
-Crawls the METU IE Summer Practice website and extracts content from
-HTML pages, PDFs, and DOC/DOCX files. Outputs a simple JSON dataset
-with one entry per page/document containing url, title, and raw content.
+Crawls the METU IE Summer Practice website (sp-ie.metu.edu.tr) and extracts
+content from HTML pages, PDFs, and DOC/DOCX files. Outputs a JSON dataset
+with url, title, and raw content per page/document.
 
-Chunking, deduplication, and vectorization are handled by vectorisation.py.
+Chunking and vectorization are handled separately by vectorisation.py.
 """
 
 import os
@@ -38,14 +38,14 @@ try:
 except ImportError:
     Document = None
 
-# Set up logging for error handling and progress tracking
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 
 def perform_login(session):
     """
-    Attempts to log in to the METU system using credentials from .env via Basic Authentication.
-    If no credentials are provided, simply returns False.
+    Log in to the METU system via HTTP Basic Auth using credentials from .env.
+    Returns False if no valid credentials are provided.
     """
     load_dotenv()
     username = os.getenv("METU_USERNAME")
@@ -93,15 +93,12 @@ def fetch_html(url, session):
         return None
 
 def clean_raw_text(text):
-    """
-    Clean raw text from any source (HTML, PDF, DOC).
-    Removes form template noise and normalizes whitespace.
-    """
+    """Clean raw text: remove form noise and normalize whitespace."""
     if not text:
         return ""
     # Remove form template noise
-    text = re.sub(r'\.{3,}', '', text)           # "......." patterns
-    text = re.sub(r'_{3,}', '', text)             # "________" patterns
+    text = re.sub(r'\.{3,}', '', text)     # dotted fills
+    text = re.sub(r'_{3,}', '', text)       # underline fills
     # Normalize whitespace
     text = re.sub(r'[\r\t\f\v ]+', ' ', text)
     text = re.sub(r'\n\s*\n+', '\n\n', text)
@@ -112,14 +109,14 @@ def _clean_document_title(filename):
     if not any(filename.lower().endswith(ext) for ext in ['.pdf', '.doc', '.docx']):
         return filename
     
-    name = filename.rsplit('.', 1)[0]           # remove extension
-    name = re.sub(r'_\d+$', '', name)           # remove version suffix (_0, _1)
+    name = filename.rsplit('.', 1)[0]
+    name = re.sub(r'_\d+$', '', name)     # strip version suffix (_0, _1)
     name = name.replace('_', ' ').replace('-', ' ')
     name = name.title()
     
-    # Fix known abbreviations to uppercase
-    name = re.sub(r'\bIe\s*(\d)', r'IE \1', name)   # "Ie 300" → "IE 300"
-    name = re.sub(r'\bIe(\d)', r'IE \1', name)       # "Ie300" → "IE 300"
+    # Normalize known abbreviations
+    name = re.sub(r'\bIe\s*(\d)', r'IE \1', name)
+    name = re.sub(r'\bIe(\d)', r'IE \1', name)
     name = re.sub(r'\bSp\b', 'SP', name)
     name = re.sub(r'\bSgk\b', 'SGK', name)
     name = re.sub(r'\bOhs\b', 'OHS', name)
@@ -178,7 +175,7 @@ def fetch_doc_text(url, session):
             logging.warning(f"Spire.Doc not installed. Cannot read {url}")
             return ""
             
-        # Spire.Doc requires reading from a file object path on disk.
+        # Spire.Doc requires a file on disk, not a stream
         temp_path = "temp_download.doc"
         with open(temp_path, "wb") as f:
             f.write(response.content)
@@ -202,7 +199,7 @@ def clean_data(soup):
     if not soup:
         return ""
     
-    # Removed 'aside' to prevent data loss in important sidebars
+    # Remove boilerplate elements
     tags_to_remove = ['nav', 'footer', 'header', 'script', 'style', 'noscript', 'meta', 'link']
     for tag in tags_to_remove:
         for element in soup.find_all(tag):
@@ -252,12 +249,12 @@ def get_all_internal_links(base_url, session):
             parsed_url = urlparse(full_url)
             
             if parsed_url.netloc == base_domain and parsed_url.path.startswith(base_path):
-                # We skip obviously non-text extensions, but keep pdf and doc/docx
+                # Skip binary file types but keep pdf/doc/docx
                 if not full_url.lower().endswith(('.xls', '.xlsx', '.zip', '.rar', '.jpg', '.png', '.jpeg')):
                     if full_url not in all_links:
                         all_links.add(full_url)
                         
-                        # Only append HTML pages to the queue, prevent fetching HTML tags from a PDF!
+                        # Only queue HTML pages for further crawling
                         if not full_url.lower().endswith(('.pdf', '.doc', '.docx')):
                             queue.append(full_url)
                         
@@ -267,13 +264,13 @@ def main():
     base_url = "https://sp-ie.metu.edu.tr/en"
     session = requests.Session()
     
-    # Add retry strategy for robustness against transient network errors
+    # Configure retry strategy for transient network errors
     retry_strategy = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     
-    # 0. Attempt Login using environment variables
+    # Attempt login
     perform_login(session)
     
     logging.info(f"Starting crawl to find all pages under: {base_url}")
@@ -284,14 +281,14 @@ def main():
     
     final_dataset = []
     
-    # 2. Iterate over ALL found pages and documents and extract content
+    # 2. Scrape content from each page/document
     for url in urls_to_scrape:
         logging.info(f"Scraping content from: {url}")
         
         page_title = url.split('/')[-1] if not url.endswith('/') else url.split('/')[-2]
         cleaned_text = ""
         
-        # For document files, convert filename to a human-readable title
+        # Convert document filenames to human-readable titles
         if any(url.lower().endswith(ext) for ext in ['.pdf', '.doc', '.docx']):
             page_title = _clean_document_title(page_title)
         
@@ -317,16 +314,15 @@ def main():
         else:
             logging.warning(f"No content extracted from {url}")
 
-    # 2.5. Deduplicate entries (by normalized URL and by exact content)
-    # URL normalization strips version suffixes (_0, _1) from document filenames
-    # so ie300-manual_0.pdf and ie300-manual_1.pdf are caught as duplicates,
-    # while IE 300 vs IE 400 variants (different base names) are preserved.
+    # 2.5. Deduplicate by normalized URL and content hash
+    # URL normalization strips version suffixes (_0, _1) so
+    # ie300-manual_0.pdf and ie300-manual_1.pdf are caught as duplicates.
     seen_urls = set()
     seen_content = set()
     deduped = []
     for entry in final_dataset:
         url_key = entry['url'].rstrip('/')
-        # Normalize versioned document URLs: strip _0, _1 etc. before extension
+        # Normalize versioned document URLs
         url_key = re.sub(r'_\d+\.(pdf|doc|docx)$', r'.\1', url_key)
         content_key = hash(entry['content'].strip())
         if url_key in seen_urls or content_key in seen_content:
@@ -341,7 +337,7 @@ def main():
         logging.info(f"Deduplication removed {removed} entries.")
     final_dataset = deduped
 
-    # 3. Save to JSON file locally
+    # 3. Save to JSON
     output_filename = "metu_ie_chatbot_dataset.json"
     try:
         with open(output_filename, 'w', encoding='utf-8') as f:

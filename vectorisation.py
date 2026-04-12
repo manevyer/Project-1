@@ -9,7 +9,7 @@ Key design decisions:
 - Supports both new format ('content'/'title'/'url') and legacy format ('chatbot_response'/'topic').
 - Chunking happens ONLY here (single-point chunking), not in webscrap.py,
   to avoid the double-chunking problem.
-- chunk_size=800 keeps chunks within the 512-token limit of multilingual-e5-small.
+- chunk_size=800 keeps chunks within the 512-token limit of multilingual-e5-base.
 """
 
 import os
@@ -167,7 +167,7 @@ class DataProcessor:
 class VectorDatabaseManager:
     """Class to manage vector embeddings and vector DB operations using ChromaDB."""
     
-    def __init__(self, persist_directory: str = "./chroma_db", collection_name: str = "chatbot_data", model_name: str = "intfloat/multilingual-e5-small"):
+    def __init__(self, persist_directory: str = "./chroma_db", collection_name: str = "chatbot_data", model_name: str = "intfloat/multilingual-e5-base"):
         """
         Initializes the Vector DB Client and embedding function.
         
@@ -272,7 +272,7 @@ def main():
     db_manager = VectorDatabaseManager(
         persist_directory=DB_DIR, 
         collection_name="metu_chatbot",
-        model_name="intfloat/multilingual-e5-small"
+        model_name="intfloat/multilingual-e5-base"
     )
     
     db_manager.create_and_store_embeddings(documents, metadatas)

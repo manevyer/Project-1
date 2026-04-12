@@ -1,5 +1,4 @@
 streamlit>=1.35.0
-langchain-core>=0.3.0
 langchain-chroma
 langchain-text-splitters
 langchain-huggingface
@@ -8,7 +7,6 @@ groq
 torch --index-url https://download.pytorch.org/whl/cpu
 chromadb
 pysqlite3-binary
-tqdm
 python-dotenv
 pypdf
 python-docx
