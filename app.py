@@ -29,7 +29,7 @@ except KeyError:
 client = Groq(api_key=GROQ_API_KEY)
 
 # --- MODEL CONFIGURATION ---
-LLM_MODEL = "llama-3.3-70b-versatile"
+LLM_MODEL = "openai/gpt-oss-120b"
 
 # --- VECTOR DATABASE LOADING ---
 # Cached to avoid reloading on every Streamlit rerun.
