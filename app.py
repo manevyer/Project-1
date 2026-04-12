@@ -217,6 +217,8 @@ if prompt:
     st.session_state.messages.append({"role": "assistant", "content": full_response})
 
 # --- EXPORT CHAT (rendered last so it always includes the latest messages) ---
+# Dynamic key forces Streamlit to create a fresh download button widget whenever
+# the conversation changes, preventing stale data from being served on click.
 with st.sidebar:
     if st.session_state.get("messages"):
         chat_lines = []
@@ -226,8 +228,9 @@ with st.sidebar:
         chat_export = ("\n" + "─" * 40 + "\n\n").join(chat_lines)
         st.download_button(
             "📥 Sohbeti İndir / Export Chat",
-            data=chat_export,
+            data=chat_export.encode("utf-8"),
             file_name="metu_ie_chat_export.txt",
             mime="text/plain",
-            use_container_width=True
+            use_container_width=True,
+            key=f"export_chat_{len(st.session_state.messages)}"
         )
