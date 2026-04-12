@@ -71,21 +71,7 @@ with st.sidebar:
     if st.button("🗑️ Sohbeti Temizle / Clear Chat", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
-    
-    # Export chat history as a downloadable text file
-    if st.session_state.get("messages"):
-        chat_lines = []
-        for msg in st.session_state.messages:
-            role = "🧑 Kullanıcı / User" if msg["role"] == "user" else "🤖 Danışman / Consultant"
-            chat_lines.append(f"{role}:\n{msg['content']}\n")
-        chat_export = ("\n" + "─" * 40 + "\n\n").join(chat_lines)
-        st.download_button(
-            "📥 Sohbeti İndir / Export Chat",
-            data=chat_export,
-            file_name="metu_ie_chat_export.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
+
     
     st.divider()
     st.markdown("### ℹ️ Hakkında / About")
@@ -229,3 +215,19 @@ if prompt:
 
     # 5. Save assistant response to history
     st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+# --- EXPORT CHAT (rendered last so it always includes the latest messages) ---
+with st.sidebar:
+    if st.session_state.get("messages"):
+        chat_lines = []
+        for msg in st.session_state.messages:
+            role = "🧑 Kullanıcı / User" if msg["role"] == "user" else "🤖 Danışman / Consultant"
+            chat_lines.append(f"{role}:\n{msg['content']}\n")
+        chat_export = ("\n" + "─" * 40 + "\n\n").join(chat_lines)
+        st.download_button(
+            "📥 Sohbeti İndir / Export Chat",
+            data=chat_export,
+            file_name="metu_ie_chat_export.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
