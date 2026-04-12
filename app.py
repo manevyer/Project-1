@@ -1,6 +1,9 @@
-__import__('pysqlite3')
 import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+try:
+    __import__('pysqlite3')
+    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+except ImportError:
+    pass  # pysqlite3 is only needed on Streamlit Cloud (Linux)
 
 import streamlit as st
 from groq import Groq
@@ -23,8 +26,11 @@ st.caption("IE 300 / IE 400 yaz stajı hakkında Türkçe veya İngilizce sorula
 try:
     GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 except KeyError:
-    st.error("🚨 GROQ_API_KEY not found! Please check your Streamlit secrets.toml file.")
-    st.stop()
+    try:
+        GROQ_API_KEY = st.secrets["MY_API_KEY"]
+    except KeyError:
+        st.error("🚨 API key not found! Please add GROQ_API_KEY or MY_API_KEY to your .streamlit/secrets.toml file.")
+        st.stop()
 
 client = Groq(api_key=GROQ_API_KEY)
 
